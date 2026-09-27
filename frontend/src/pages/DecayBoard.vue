@@ -8,12 +8,20 @@ import FilterBar, { type FilterModel } from '@/components/common/FilterBar.vue'
 import SeverityTag from '@/components/common/SeverityTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useDecayFilter } from '@/hooks/useDecayFilter'
+import {
+  followArea,
+  keepSeverity,
+  pickSeverity,
+  resetToArea,
+  useSeverityGrade,
+  type SeverityGradeState
+} from '@/hooks/useSeverityGrade'
 import { useHallStore } from '@/stores/hallStore'
 import { useDecayStore } from '@/stores/decayStore'
 import { useRepairStore } from '@/stores/repairStore'
 import { DECAY_TYPES, type Decay, type DecayType, type Severity } from '@/types/decay'
 import { SEVERITIES } from '@/types/decay'
-import { formatArea, SEVERITY_COLOR } from '@/utils/severity'
+import { formatArea, SEVERITY_COLOR, severityByArea } from '@/utils/severity'
 
 const router = useRouter()
 const hallStore = useHallStore()
@@ -42,10 +50,15 @@ const editDialogVisible = ref(false)
 const editingDecay = ref<Decay | null>(null)
 const editForm = ref<{
   type: DecayType
-  severity: Severity
   areaCm2: number
   causeGuess: string
-}>({ type: '起甲', severity: '轻度', areaCm2: 10, causeGuess: '' })
+}>({ type: '起甲', areaCm2: 10, causeGuess: '' })
+
+/** 编辑弹窗的档位编排 */
+let editGrade: SeverityGradeState | null = null
+/** 改面积确认前的面积，取消时回退 */
+let editAreaBeforeChange = 0
+const editReasonError = ref('')
 
 const filterModel = computed<FilterModel>(() => ({
   keyword: filter.value.keyword,
@@ -132,7 +145,27 @@ async function applyBatchSeverity(): Promise<void> {
     ElMessage.warning('请先勾选需要修改的病害记录')
     return
   }
-  await decayStore.bulkSetSeverity(ids, batchSeverity.value)
+  // 找出目标档与面积档不一致的记录：这些必须写明人工定档依据
+  const selectedRows = decayStore.decays.filter((decay) => ids.includes(decay.id))
+  const needManual = selectedRows.some(
+    (decay) => severityByArea(decay.areaCm2) !== batchSeverity.value
+  )
+  let reason = ''
+  if (needManual) {
+    const { value } = await ElMessageBox.prompt(
+      `有记录的面积档不是「${batchSeverity.value}」，改为该档将记为人工定档，请写明现场依据`,
+      '人工定档依据',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        inputPattern: /\S+/,
+        inputErrorMessage: '人工定档必须写明依据'
+      }
+    ).catch(() => ({ value: '' }))
+    if (!value?.trim()) return
+    reason = value.trim()
+  }
+  await decayStore.bulkSetSeverity(ids, batchSeverity.value, reason)
   ElMessage.success(`已将 ${ids.length} 条病害的严重程度改为「${batchSeverity.value}」`)
 }
 
@@ -150,18 +183,104 @@ function openEdit(row: { decay: Decay }): void {
   editingDecay.value = row.decay
   editForm.value = {
     type: row.decay.type,
-    severity: row.decay.severity,
     areaCm2: row.decay.areaCm2,
     causeGuess: row.decay.causeGuess
   }
+  editReasonError.value = ''
+  editAreaBeforeChange = row.decay.areaCm2
+  editGrade = useSeverityGrade({
+    areaCm2: computed(() => editForm.value.areaCm2),
+    initialSeverity: row.decay.severity,
+    initialSource: row.decay.severitySource,
+    initialReason: row.decay.severityReason
+  })
   editDialogVisible.value = true
 }
 
+/** 编辑弹窗里师傅改选档位：与面积档一致回自动，否则转人工 */
+function handleEditSeverityPick(next: Severity): void {
+  if (!editGrade) return
+  pickSeverity(editGrade, next)
+  if (editGrade.source.value === 'auto') editReasonError.value = ''
+}
+
+/**
+ * 编辑时改面积：
+ * 只要面积档与当前档位不一致，先问师傅要不要保留原档位
+ * （无论原档位是面积自动落的还是人工定的）。
+ */
+async function handleEditAreaChange(value: number | undefined): Promise<void> {
+  if (!editGrade) return
+  const nextArea = typeof value === 'number' && Number.isFinite(value) ? value : editAreaBeforeChange
+  const suggested = severityByArea(nextArea)
+  if (suggested !== editGrade.severity.value) {
+    const keep = await ElMessageBox.confirm(
+      `面积改为 ${formatArea(nextArea)} 后，按面积应落「${suggested}」。是否保留原档位「${editGrade.severity.value}」？`,
+      '面积档位发生变化',
+      {
+        confirmButtonText: '保留原档位（记为人工定档）',
+        cancelButtonText: '按面积重算',
+        distinguishCancelAndClose: true,
+        type: 'warning'
+      }
+    )
+      .then(() => true)
+      .catch((action: string) => action)
+    // 关闭确认框：面积回退，什么都不改
+    if (keep === 'close') {
+      editForm.value.areaCm2 = editAreaBeforeChange
+      return
+    }
+    if (keep === true) {
+      let basis = editGrade.reason.value
+      if (!basis.trim()) {
+        const { value } = await ElMessageBox.prompt('请写明保留该档位的现场依据', '人工定档依据', {
+          confirmButtonText: '确定',
+          cancelButtonText: '按面积重算',
+          inputPattern: /\S+/,
+          inputErrorMessage: '人工定档必须写明依据'
+        }).catch(() => ({ value: '' }))
+        if (!value?.trim()) {
+          editForm.value.areaCm2 = nextArea
+          followArea(editGrade)
+          editAreaBeforeChange = nextArea
+          return
+        }
+        basis = value
+      }
+      editForm.value.areaCm2 = nextArea
+      keepSeverity(editGrade, basis)
+    } else {
+      editForm.value.areaCm2 = nextArea
+      followArea(editGrade)
+    }
+  } else {
+    editForm.value.areaCm2 = nextArea
+    // 面积档未变：原人工定档保持不动，自动档跟随
+    if (editGrade.source.value === 'auto') followArea(editGrade)
+  }
+  editAreaBeforeChange = editForm.value.areaCm2
+  editReasonError.value = ''
+}
+
+/** 放弃人工定档，回到面积档 */
+function resetEditGradeToArea(): void {
+  if (!editGrade) return
+  resetToArea(editGrade)
+  editReasonError.value = ''
+}
+
 async function submitEdit(): Promise<void> {
-  if (!editingDecay.value) return
+  if (!editingDecay.value || !editGrade) return
+  if (editGrade.source.value === 'manual' && !editGrade.reason.value.trim()) {
+    editReasonError.value = '人工定档必须写明依据'
+    return
+  }
   await decayStore.updateDecay(editingDecay.value.id, {
     type: editForm.value.type,
-    severity: editForm.value.severity,
+    severity: editGrade.severity.value,
+    severitySource: editGrade.source.value,
+    severityReason: editGrade.source.value === 'manual' ? editGrade.reason.value.trim() : null,
     areaCm2: editForm.value.areaCm2,
     causeGuess: editForm.value.causeGuess.trim() || '待现场复核'
   })
@@ -326,9 +445,18 @@ const severityPalette = SEVERITY_COLOR
             <el-tag size="small" effect="plain">{{ row.decay.type }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="严重程度" width="170">
+        <el-table-column label="严重程度" width="210">
           <template #default="{ row }">
-            <SeverityTag :severity="row.decay.severity" :area-cm2="row.decay.areaCm2" size="small" />
+            <div class="severity-cell">
+              <SeverityTag :severity="row.decay.severity" :area-cm2="row.decay.areaCm2" size="small" />
+              <el-tooltip
+                v-if="row.decay.severitySource === 'manual'"
+                :content="`人工定档依据：${row.decay.severityReason ?? '未写明依据'}`"
+                placement="top"
+              >
+                <el-tag size="small" type="warning" effect="dark" class="manual-flag">人工定档</el-tag>
+              </el-tooltip>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="殿宇" width="150">
@@ -391,14 +519,53 @@ const severityPalette = SEVERITY_COLOR
           </el-select>
         </el-form-item>
         <el-form-item label="严重程度">
-          <el-radio-group v-model="editForm.severity">
+          <el-radio-group
+            :model-value="editGrade?.severity.value"
+            @update:model-value="handleEditSeverityPick"
+          >
             <el-radio v-for="item in severityOptionsForEdit" :key="item" :value="item">
               <span :style="{ color: severityPalette[item] }">{{ item }}</span>
             </el-radio>
           </el-radio-group>
+          <p v-if="editGrade && editGrade.source.value === 'auto'" class="grade-hint">
+            当前按面积自动落档为「{{ editGrade.areaSeverity.value }}」
+          </p>
+        </el-form-item>
+        <el-form-item v-if="editGrade && editGrade.source.value === 'manual'" label=" ">
+          <el-alert type="warning" :closable="false" show-icon class="full-width">
+            <div class="grade-alert">
+              <span>
+                人工定档：师傅现场定为「{{ editGrade.severity.value }}」，面积档为
+                「{{ editGrade.areaSeverity.value }}」，面积再变也不覆盖此档。
+              </span>
+              <el-button size="small" text type="primary" @click="resetEditGradeToArea">
+                恢复按面积落档
+              </el-button>
+            </div>
+          </el-alert>
+        </el-form-item>
+        <el-form-item
+          v-if="editGrade && editGrade.needReason.value"
+          label="定档依据"
+          :error="editReasonError"
+          required
+        >
+          <el-input
+            v-model="editGrade.reason.value"
+            placeholder="写明师傅现场判定依据"
+            @input="editReasonError = ''"
+          />
         </el-form-item>
         <el-form-item label="面积（cm²）">
-          <el-input-number v-model="editForm.areaCm2" :min="0.1" :max="1000000" :step="10" :precision="1" />
+          <el-input-number
+            v-model="editForm.areaCm2"
+            :min="0.1"
+            :max="1000000"
+            :step="10"
+            :precision="1"
+            @change="handleEditAreaChange"
+          />
+          <span class="grade-hint">＜200 轻度，200～800 中度，＞800 重度；改面积会先确认是否保留原档</span>
         </el-form-item>
         <el-form-item label="成因初判">
           <el-input v-model="editForm.causeGuess" type="textarea" :rows="3" maxlength="120" show-word-limit />
@@ -437,5 +604,29 @@ const severityPalette = SEVERITY_COLOR
 .repair-progress {
   margin-left: 6px;
   font-size: 12px;
+}
+
+.severity-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.manual-flag {
+  cursor: help;
+}
+
+.grade-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #8a7f72;
+}
+
+.grade-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 </style>

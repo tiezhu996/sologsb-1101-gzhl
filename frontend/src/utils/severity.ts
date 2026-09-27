@@ -1,5 +1,21 @@
 import type { Severity } from '@/types/decay'
 
+/** 自动落档面积阈值（平方厘米）：小于 200 轻度，200～800 中度，超过 800 重度 */
+export const AREA_LIGHT_MAX = 200
+export const AREA_MEDIUM_MAX = 800
+
+/**
+ * 按单处病害面积自动落档：
+ * - 不到 200 cm²：轻度
+ * - 200～800 cm²（含两端）：中度
+ * - 超过 800 cm²：重度
+ */
+export function severityByArea(areaCm2: number): Severity {
+  if (!Number.isFinite(areaCm2) || areaCm2 < AREA_LIGHT_MAX) return '轻度'
+  if (areaCm2 <= AREA_MEDIUM_MAX) return '中度'
+  return '重度'
+}
+
 /** 严重程度排序权重：重度最前 */
 export const SEVERITY_WEIGHT: Record<Severity, number> = {
   重度: 30,

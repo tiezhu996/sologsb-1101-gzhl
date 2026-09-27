@@ -6,6 +6,32 @@ import {
   stampBackupTime,
   type BackupPayload
 } from '@/utils/db'
+import { SEVERITIES, type Decay, type Severity } from '@/types/decay'
+import { severityByArea } from '@/utils/severity'
+
+/**
+ * 归一化病害档案：兼容旧版备份（没有档位来源字段）。
+ * 缺失来源时按当前面积补一次判定；人工定档但缺依据的，标注来源不明。
+ */
+function normalizeDecay(decay: Decay): Decay {
+  const severity: Severity = (SEVERITIES as string[]).includes(decay.severity)
+    ? decay.severity
+    : severityByArea(decay.areaCm2)
+  if (decay.severitySource !== 'manual') {
+    return {
+      ...decay,
+      severity: severityByArea(decay.areaCm2),
+      severitySource: 'auto',
+      severityReason: null
+    }
+  }
+  return {
+    ...decay,
+    severity,
+    severitySource: 'manual',
+    severityReason: decay.severityReason?.trim() ? decay.severityReason : '导入档案未写明定档依据'
+  }
+}
 
 /** 校验备份对象的必备字段，返回错误信息数组（为空表示通过） */
 export function validateBackup(input: unknown): { ok: boolean; errors: string[]; payload: BackupPayload | null } {
@@ -33,7 +59,7 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
     halls: obj.halls ?? [],
     elements: obj.elements ?? [],
     layers: obj.layers ?? [],
-    decays: obj.decays ?? [],
+    decays: (obj.decays ?? []).map((decay) => normalizeDecay(decay as Decay)),
     repairSteps: obj.repairSteps ?? []
   }
   return { ok: true, errors, payload }
@@ -230,6 +256,8 @@ export async function seedDemoData(): Promise<void> {
           layerId: layerIds[0],
           type: '起甲',
           severity: '重度',
+          severitySource: 'manual',
+          severityReason: '起甲连片且边缘已翘卷，师傅现场判定需立即回贴，面积档偏轻',
           areaCm2: 320.5,
           causeGuess: '地仗层脱胶，受檐口渗水影响',
           repaired: false,
@@ -242,7 +270,9 @@ export async function seedDemoData(): Promise<void> {
           layerId: layerIds[1],
           type: '龟裂',
           severity: '中度',
-          areaCm2: 158,
+          severitySource: 'auto',
+          severityReason: null,
+          areaCm2: 260,
           causeGuess: '木构件干缩引起画面开裂',
           repaired: false,
           repairedAt: null,

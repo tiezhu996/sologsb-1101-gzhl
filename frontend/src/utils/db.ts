@@ -4,9 +4,10 @@ import type { Element } from '@/types/element'
 import type { PaintLayer } from '@/types/layer'
 import type { Decay } from '@/types/decay'
 import type { RepairStep } from '@/types/repair'
+import { severityByArea } from '@/utils/severity'
 
 /** 本地结构版本号：新增/修改表结构时必须递增，并补充 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 本地存储键名（localStorage 侧的少量元数据） */
 export const LS_KEYS = {
@@ -74,6 +75,26 @@ export class MuralArchDatabase extends Dexie {
             if (typeof decay.repaired !== 'boolean') {
               decay.repaired = false
             }
+          })
+      })
+    // v3：病害档位支持「面积自动落档 / 人工定档」，旧档案按当前面积补一次判定
+    this.version(DB_VERSION)
+      .stores({
+        halls: 'id, name, era, structureType, roofType, updatedAt',
+        elements: 'id, hallId, position, status, updatedAt',
+        layers: 'id, elementId, level, patternName, pigment',
+        decays: 'id, layerId, type, severity, severitySource, repaired, repairedAt, updatedAt',
+        repairSteps: 'id, decayId, seq, name, state, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<Decay>('decays')
+          .toCollection()
+          .modify((decay) => {
+            // 旧档案没有档位来源：一律按当前面积重新落档（auto），风险分随之校正
+            decay.severity = severityByArea(decay.areaCm2)
+            decay.severitySource = 'auto'
+            decay.severityReason = null
           })
       })
   }

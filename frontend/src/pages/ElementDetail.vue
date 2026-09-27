@@ -12,6 +12,15 @@ import { useDecayStore } from '@/stores/decayStore'
 import { ELEMENT_POSITIONS, ELEMENT_STATUSES, type Element, type ElementPosition, type ElementStatus } from '@/types/element'
 import { PATTERN_NAMES, PIGMENTS, type PaintLayer, type PatternName, type Pigment } from '@/types/layer'
 import { DECAY_TYPES, SEVERITIES, type Decay, type DecayType, type Severity } from '@/types/decay'
+import {
+  followArea,
+  keepSeverity,
+  pickSeverity,
+  resetToArea,
+  useSeverityGrade,
+  type SeverityGradeState
+} from '@/hooks/useSeverityGrade'
+import { formatArea, severityByArea } from '@/utils/severity'
 
 const route = useRoute()
 const router = useRouter()
@@ -63,16 +72,21 @@ const layerForm = reactive<{
 const decayForm = reactive<{
   layerId: string
   type: DecayType
-  severity: Severity
   areaCm2: number
   causeGuess: string
 }>({
   layerId: '',
   type: '起甲',
-  severity: '轻度',
   areaCm2: 10,
   causeGuess: ''
 })
+
+/** 新增弹窗的档位编排：面积自动落档，师傅也可现场人工定档 */
+let decayGrade: SeverityGradeState | null = null
+/** 弹窗打开前的面积，用于取消「改面积重算」时回退 */
+let areaBeforeChange = 0
+/** 依据输入校验信息（人工定档必填） */
+const decayReasonError = ref('')
 
 const elementRules: FormRules = {
   name: [{ required: true, message: '请填写构件名称', trigger: 'blur' }],
@@ -330,20 +344,106 @@ async function removeLayer(layer: PaintLayer): Promise<void> {
 function openDecayDialog(layerId: string): void {
   decayForm.layerId = layerId
   decayForm.type = '起甲'
-  decayForm.severity = '轻度'
   decayForm.areaCm2 = 10
   decayForm.causeGuess = ''
+  decayReasonError.value = ''
+  areaBeforeChange = decayForm.areaCm2
+  decayGrade = useSeverityGrade({
+    areaCm2: computed(() => decayForm.areaCm2)
+  })
   decayDialogVisible.value = true
 }
 
+/** 新增弹窗里师傅手动选档：与面积档一致则恢复自动，否则转人工定档 */
+function handleDecaySeverityPick(next: Severity): void {
+  if (!decayGrade) return
+  pickSeverity(decayGrade, next)
+  if (decayGrade.source.value === 'auto') decayReasonError.value = ''
+}
+
+/**
+ * 面积一改：
+ * - 当前是人工定档（师傅已选定档位）且面积档变了：先问要不要保留；
+ * - 自动落档或面积档未变：直接按面积重算。
+ */
+async function handleDecayAreaChange(value: number | undefined): Promise<void> {
+  if (!decayGrade) return
+  const nextArea = typeof value === 'number' && Number.isFinite(value) ? value : areaBeforeChange
+  const suggested = severityByArea(nextArea)
+  if (decayGrade.source.value === 'manual' && suggested !== decayGrade.severity.value) {
+    const keep = await ElMessageBox.confirm(
+      `面积改为 ${formatArea(nextArea)} 后，按面积应落「${suggested}」。是否保留师傅现场定的「${decayGrade.severity.value}」？`,
+      '面积档位发生变化',
+      {
+        confirmButtonText: '保留现场档位（记为人工定档）',
+        cancelButtonText: '按面积重算',
+        distinguishCancelAndClose: true,
+        type: 'warning'
+      }
+    )
+      .then(() => true)
+      .catch((action: string) => action)
+    // 关闭弹窗（× / ESC / 点遮罩）：视为不改，面积回退
+    if (keep === 'close') {
+      decayForm.areaCm2 = areaBeforeChange
+      return
+    }
+    if (keep === true) {
+      let basis = decayGrade.reason.value
+      // 已有依据直接沿用，否则请师傅补一句依据
+      if (!basis.trim()) {
+        const { value } = await ElMessageBox.prompt('请写明保留该档位的现场依据', '人工定档依据', {
+          confirmButtonText: '确定',
+          cancelButtonText: '按面积重算',
+          inputPattern: /\S+/,
+          inputErrorMessage: '人工定档必须写明依据'
+        }).catch(() => ({ value: '' }))
+        if (!value?.trim()) {
+          // 放弃保留：按面积重算
+          decayForm.areaCm2 = nextArea
+          followArea(decayGrade)
+          areaBeforeChange = nextArea
+          return
+        }
+        basis = value
+      }
+      decayForm.areaCm2 = nextArea
+      keepSeverity(decayGrade, basis)
+    } else {
+      // 师傅选择按面积重算
+      decayForm.areaCm2 = nextArea
+      followArea(decayGrade)
+    }
+  } else {
+    decayForm.areaCm2 = nextArea
+    // 面积档未变：人工定档保持不动，自动档跟随面积
+    if (decayGrade.source.value === 'auto') followArea(decayGrade)
+  }
+  areaBeforeChange = decayForm.areaCm2
+  decayReasonError.value = ''
+}
+
+/** 放弃人工定档，回到按面积落档 */
+function resetDecayGradeToArea(): void {
+  if (!decayGrade) return
+  resetToArea(decayGrade)
+  decayReasonError.value = ''
+}
+
 async function submitDecay(): Promise<void> {
-  if (!decayFormRef.value) return
+  if (!decayFormRef.value || !decayGrade) return
   const valid = await decayFormRef.value.validate().catch(() => false)
   if (!valid) return
+  if (decayGrade.source.value === 'manual' && !decayGrade.reason.value.trim()) {
+    decayReasonError.value = '人工定档必须写明依据'
+    return
+  }
   await decayStore.createDecay({
     layerId: decayForm.layerId,
     type: decayForm.type,
-    severity: decayForm.severity,
+    severity: decayGrade.severity.value,
+    severitySource: decayGrade.source.value,
+    severityReason: decayGrade.source.value === 'manual' ? decayGrade.reason.value.trim() : null,
     areaCm2: decayForm.areaCm2,
     causeGuess: decayForm.causeGuess.trim() || '待现场复核',
     repaired: false,
@@ -534,9 +634,16 @@ const severityOptions = SEVERITIES
                       </div>
                       <el-table v-if="layerDecays(row.id).length > 0" :data="layerDecays(row.id)" size="small">
                         <el-table-column label="类型" prop="type" width="90" />
-                        <el-table-column label="程度" width="130">
+                        <el-table-column label="程度" width="160">
                           <template #default="{ row: decay }">
                             <SeverityTag :severity="decay.severity" :area-cm2="decay.areaCm2" size="small" plain />
+                            <el-tooltip
+                              v-if="decay.severitySource === 'manual'"
+                              :content="`人工定档：${decay.severityReason ?? '未写明依据'}`"
+                              placement="top"
+                            >
+                              <el-tag size="small" type="warning" effect="plain" class="manual-flag">人工</el-tag>
+                            </el-tooltip>
                           </template>
                         </el-table-column>
                         <el-table-column label="成因初判" prop="causeGuess" min-width="200" />
@@ -667,12 +774,53 @@ const severityOptions = SEVERITIES
           </el-select>
         </el-form-item>
         <el-form-item label="严重程度" prop="severity">
-          <el-radio-group v-model="decayForm.severity">
+          <el-radio-group
+            :model-value="decayGrade?.severity.value"
+            @update:model-value="handleDecaySeverityPick"
+          >
             <el-radio v-for="item in severityOptions" :key="item" :value="item">{{ item }}</el-radio>
           </el-radio-group>
+          <p v-if="decayGrade && decayGrade.source.value === 'auto'" class="grade-hint">
+            当前按面积自动落档为「{{ decayGrade.areaSeverity.value }}」
+          </p>
+        </el-form-item>
+        <el-form-item v-if="decayGrade && decayGrade.source.value === 'manual'" label=" ">
+          <el-alert type="warning" :closable="false" show-icon class="full-width">
+            <div class="grade-alert">
+              <span>
+                人工定档：师傅现场定为「{{ decayGrade.severity.value }}」，面积档为
+                「{{ decayGrade.areaSeverity.value }}」，改面积不会覆盖此档。
+              </span>
+              <el-button size="small" text type="primary" @click="resetDecayGradeToArea">
+                恢复按面积落档
+              </el-button>
+            </div>
+          </el-alert>
+        </el-form-item>
+        <el-form-item
+          v-if="decayGrade && decayGrade.needReason.value"
+          label="定档依据"
+          :error="decayReasonError"
+          required
+        >
+          <el-input
+            v-model="decayGrade.reason.value"
+            placeholder="写明现场判定依据，如：起甲连片翘卷，已见地仗层脱粘"
+            @input="decayReasonError = ''"
+          />
         </el-form-item>
         <el-form-item label="面积（cm²）" prop="areaCm2">
-          <el-input-number v-model="decayForm.areaCm2" :min="0.1" :max="1000000" :step="10" :precision="1" />
+          <el-input-number
+            v-model="decayForm.areaCm2"
+            :min="0.1"
+            :max="1000000"
+            :step="10"
+            :precision="1"
+            @change="handleDecayAreaChange"
+          />
+          <span class="grade-hint">
+            ＜200 轻度，200～800 中度，＞800 重度
+          </span>
         </el-form-item>
         <el-form-item label="成因初判" prop="causeGuess">
           <el-input
@@ -761,6 +909,24 @@ const severityOptions = SEVERITIES
 
 .full-width {
   width: 100%;
+}
+
+.grade-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #8a7f72;
+}
+
+.grade-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.manual-flag {
+  margin-left: 6px;
+  cursor: help;
 }
 
 @media (max-width: 900px) {

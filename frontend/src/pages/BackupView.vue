@@ -56,7 +56,7 @@ const storageRows = computed(() => [
   { table: 'layers（彩画层位）', key: 'id, elementId, level, patternName, pigment', count: counts.value.layers },
   {
     table: 'decays（病害）',
-    key: 'id, layerId, type, severity, repaired, repairedAt, updatedAt',
+    key: 'id, layerId, type, severity, severitySource, repaired, repairedAt, updatedAt',
     count: counts.value.decays
   },
   { table: 'repairSteps（工序）', key: 'id, decayId, seq, name, state, updatedAt', count: counts.value.repairSteps }

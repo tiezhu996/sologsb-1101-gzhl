@@ -11,7 +11,7 @@ import {
 } from '@/types/decay'
 import type { Element } from '@/types/element'
 import type { PaintLayer } from '@/types/layer'
-import { SEVERITY_WEIGHT } from '@/utils/severity'
+import { SEVERITY_WEIGHT, severityByArea } from '@/utils/severity'
 
 /** 病害档案台的一行：病害 + 所属层位 + 构件（含殿宇信息） */
 export interface DecayRow {
@@ -186,14 +186,26 @@ export const useDecayStore = defineStore('decay', () => {
     selectedIds.delete(id)
   }
 
-  /** 批量改严重程度（档案台批量操作） */
-  async function bulkSetSeverity(ids: string[], severity: Severity): Promise<number> {
+  /**
+   * 批量改严重程度（档案台批量操作，属师傅现场定档）。
+   * 目标档与某条面积档一致时，该条回到自动落档；
+   * 不一致则记为人工定档，必须写明依据。
+   */
+  async function bulkSetSeverity(ids: string[], severity: Severity, reason = ''): Promise<number> {
+    const manualReason = reason.trim()
     const now = Date.now()
     await db.decays
       .where('id')
       .anyOf(ids)
       .modify((decay) => {
         decay.severity = severity
+        if (severity === severityByArea(decay.areaCm2)) {
+          decay.severitySource = 'auto'
+          decay.severityReason = null
+        } else {
+          decay.severitySource = 'manual'
+          decay.severityReason = manualReason
+        }
         decay.updatedAt = now
       })
     return ids.length
