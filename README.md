@@ -84,10 +84,12 @@ npm run preview    # 本地预览构建产物（http://localhost:21801）
 | Hall 殿宇 | `src/types/hall.ts` | `id` `name` `era` `structureType`（大木/小式） `roofType`（庑殿/歇山/悬山） | 新建后进入构件录入 |
 | Element 构件 | `src/types/element.ts` | `id` `hallId` `position`（檐下/室内/梁枋/斗拱/天花） `name` `layerCount` `baseLayer` `status`（完好/观察/待修） | 按殿宇与部位二维筛选 |
 | PaintLayer 彩画层位 | `src/types/layer.ts` | `id` `elementId` `level`（由外至内） `patternName`（旋子/和玺/苏式） `pigment`（石青/石绿/朱砂/土黄） `thicknessMm` | 层位顺次叠压 |
-| Decay 病害记录 | `src/types/decay.ts` | `id` `layerId` `type`（起甲/剥落/空鼓/粉化/龟裂） `severity`（轻度/中度/重度） `areaCm2` `causeGuess` `repaired` | 同层位可叠加多条并汇总到殿宇 |
+| Decay 病害记录 | `src/types/decay.ts` | `id` `layerId` `type`（起甲/剥落/空鼓/粉化/龟裂） `severity`（轻度/中度/重度） `severitySource`（auto 按面积自动 / manual 人工定档） `severityReason` `areaCm2` `causeGuess` `repaired` | 面积一改按阈值自动落档；人工定档写明依据且不被面积顶掉；同层位可叠加多条并汇总到殿宇 |
 | RepairStep 修复工序 | `src/types/repair.ts` | `id` `decayId` `seq` `name`（除尘/回贴/灌浆/补绘/封护） `material` `operator` `state`（未开始/进行中/已完成） | 拖拽排序，完成回写病害 |
 
-数据结构版本号 `DB_VERSION` 定义在 `src/utils/db.ts`，当前为 `v2`：`decays` 表补充 `repairedAt` 索引，并为修复状态缺失的历史数据按 `updatedAt` 回填，升级逻辑写在 Dexie 的 `.upgrade()` 中。
+数据结构版本号 `DB_VERSION` 定义在 `src/utils/db.ts`，当前为 `v3`：
+- v2：`decays` 表补充 `repairedAt` 索引，并为修复状态缺失的历史数据按 `updatedAt` 回填；
+- v3：`decays` 表补充 `severitySource` 索引与 `severityReason` 字段。无档位来源的旧档案按当前面积补一次判定（不足 200 cm² 轻度、200~800 cm² 中度、超过 800 cm² 重度），升级逻辑写在 Dexie 的 `.upgrade()` 中。旧版本备份导入时按同一口径归一化。
 
 ---
 

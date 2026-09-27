@@ -186,14 +186,20 @@ export const useDecayStore = defineStore('decay', () => {
     selectedIds.delete(id)
   }
 
-  /** 批量改严重程度（档案台批量操作） */
-  async function bulkSetSeverity(ids: string[], severity: Severity): Promise<number> {
+  /**
+   * 批量改严重程度（档案台批量操作）。
+   * 由师傅在档案台改判，一律记为人工定档并要求写明依据。
+   */
+  async function bulkSetSeverity(ids: string[], severity: Severity, reason: string): Promise<number> {
     const now = Date.now()
+    const trimmedReason = reason.trim()
     await db.decays
       .where('id')
       .anyOf(ids)
       .modify((decay) => {
         decay.severity = severity
+        decay.severitySource = 'manual'
+        decay.severityReason = trimmedReason
         decay.updatedAt = now
       })
     return ids.length

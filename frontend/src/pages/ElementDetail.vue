@@ -12,6 +12,8 @@ import { useDecayStore } from '@/stores/decayStore'
 import { ELEMENT_POSITIONS, ELEMENT_STATUSES, type Element, type ElementPosition, type ElementStatus } from '@/types/element'
 import { PATTERN_NAMES, PIGMENTS, type PaintLayer, type PatternName, type Pigment } from '@/types/layer'
 import { DECAY_TYPES, SEVERITIES, type Decay, type DecayType, type Severity } from '@/types/decay'
+import { useSeverityForm } from '@/hooks/useSeverityForm'
+import { AREA_SEVERITY_RULE_TEXT } from '@/utils/severity'
 
 const route = useRoute()
 const router = useRouter()
@@ -63,16 +65,25 @@ const layerForm = reactive<{
 const decayForm = reactive<{
   layerId: string
   type: DecayType
-  severity: Severity
-  areaCm2: number
   causeGuess: string
 }>({
   layerId: '',
   type: '起甲',
-  severity: '轻度',
-  areaCm2: 10,
   causeGuess: ''
 })
+
+/** 档位由面积自动落档，师傅也可按现场情况手选（记为人工定档并写明依据） */
+const {
+  severity: decaySeverity,
+  areaCm2: decayArea,
+  source: decaySeveritySource,
+  reason: decayReason,
+  autoSeverity: decayAutoSeverity,
+  isManual: decayIsManual,
+  reasonMissing: decayReasonMissing,
+  reset: resetDecaySeverity,
+  followArea: followDecayArea
+} = useSeverityForm({ askOnAreaChange: () => false })
 
 const elementRules: FormRules = {
   name: [{ required: true, message: '请填写构件名称', trigger: 'blur' }],
@@ -330,9 +341,8 @@ async function removeLayer(layer: PaintLayer): Promise<void> {
 function openDecayDialog(layerId: string): void {
   decayForm.layerId = layerId
   decayForm.type = '起甲'
-  decayForm.severity = '轻度'
-  decayForm.areaCm2 = 10
   decayForm.causeGuess = ''
+  resetDecaySeverity({ severity: '轻度', areaCm2: 10, source: 'auto', reason: '' })
   decayDialogVisible.value = true
 }
 
@@ -340,11 +350,17 @@ async function submitDecay(): Promise<void> {
   if (!decayFormRef.value) return
   const valid = await decayFormRef.value.validate().catch(() => false)
   if (!valid) return
+  if (decayReasonMissing.value) {
+    ElMessage.warning('人工定档需写明现场依据')
+    return
+  }
   await decayStore.createDecay({
     layerId: decayForm.layerId,
     type: decayForm.type,
-    severity: decayForm.severity,
-    areaCm2: decayForm.areaCm2,
+    severity: decaySeverity.value,
+    severitySource: decaySeveritySource.value,
+    severityReason: decaySeveritySource.value === 'manual' ? decayReason.value.trim() : null,
+    areaCm2: decayArea.value,
     causeGuess: decayForm.causeGuess.trim() || '待现场复核',
     repaired: false,
     repairedAt: null
@@ -536,7 +552,14 @@ const severityOptions = SEVERITIES
                         <el-table-column label="类型" prop="type" width="90" />
                         <el-table-column label="程度" width="130">
                           <template #default="{ row: decay }">
-                            <SeverityTag :severity="decay.severity" :area-cm2="decay.areaCm2" size="small" plain />
+                            <SeverityTag
+                              :severity="decay.severity"
+                              :area-cm2="decay.areaCm2"
+                              :manual="decay.severitySource === 'manual'"
+                              :reason="decay.severityReason"
+                              size="small"
+                              plain
+                            />
                           </template>
                         </el-table-column>
                         <el-table-column label="成因初判" prop="causeGuess" min-width="200" />
@@ -666,13 +689,38 @@ const severityOptions = SEVERITIES
             <el-option v-for="item in decayTypeOptions" :key="item" :label="item" :value="item" />
           </el-select>
         </el-form-item>
+        <el-form-item label="面积（cm²）" prop="areaCm2">
+          <el-input-number v-model="decayArea" :min="0.1" :max="1000000" :step="10" :precision="1" />
+          <p class="severity-hint">按面积自动落档：{{ AREA_SEVERITY_RULE_TEXT }}</p>
+        </el-form-item>
         <el-form-item label="严重程度" prop="severity">
-          <el-radio-group v-model="decayForm.severity">
+          <el-radio-group v-model="decaySeverity">
             <el-radio v-for="item in severityOptions" :key="item" :value="item">{{ item }}</el-radio>
           </el-radio-group>
+          <el-tag v-if="decayIsManual" size="small" type="warning" effect="plain" class="severity-badge">
+            人工定档
+          </el-tag>
+          <el-tag v-else size="small" type="success" effect="plain" class="severity-badge">按面积自动</el-tag>
+          <el-button
+            v-if="decayIsManual"
+            link
+            type="primary"
+            size="small"
+            class="severity-restore"
+            @click="followDecayArea"
+          >
+            恢复按面积落「{{ decayAutoSeverity }}」
+          </el-button>
         </el-form-item>
-        <el-form-item label="面积（cm²）" prop="areaCm2">
-          <el-input-number v-model="decayForm.areaCm2" :min="0.1" :max="1000000" :step="10" :precision="1" />
+        <el-form-item v-if="decayIsManual" label="定档依据" required>
+          <el-input
+            v-model="decayReason"
+            type="textarea"
+            :rows="2"
+            maxlength="120"
+            show-word-limit
+            placeholder="请写明师傅现场判定依据，如：裂缝已贯穿地仗、空鼓敲击大面积脱层"
+          />
         </el-form-item>
         <el-form-item label="成因初判" prop="causeGuess">
           <el-input
@@ -757,6 +805,21 @@ const severityOptions = SEVERITIES
 .layer-decays__empty {
   margin: 0;
   font-size: 13px;
+}
+
+.severity-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #8a7f72;
+}
+
+.severity-badge {
+  margin-left: 8px;
+}
+
+.severity-restore {
+  margin-left: 4px;
 }
 
 .full-width {

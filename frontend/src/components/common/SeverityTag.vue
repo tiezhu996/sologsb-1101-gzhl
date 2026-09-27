@@ -15,12 +15,18 @@ const props = withDefaults(
     size?: 'default' | 'small' | 'large'
     /** 是否使用描边风格 */
     plain?: boolean
+    /** 是否为师傅现场人工定档（非按面积自动落档） */
+    manual?: boolean
+    /** 人工定档依据，悬停标记时展示 */
+    reason?: string | null
   }>(),
   {
     icon: true,
     areaCm2: undefined,
     size: 'default',
-    plain: false
+    plain: false,
+    manual: false,
+    reason: null
   }
 )
 
@@ -53,6 +59,13 @@ const areaText = computed(() => {
     </el-icon>
     <span class="severity-tag__text">{{ severity }}</span>
     <span v-if="areaText" class="severity-tag__area">· {{ areaText }}</span>
+    <el-tooltip
+      v-if="manual"
+      :content="reason ? `人工定档：${reason}` : '人工定档（师傅现场判定，面积变化不重算）'"
+      placement="top"
+    >
+      <span class="severity-tag__manual">人工</span>
+    </el-tooltip>
   </span>
 </template>
 
@@ -89,5 +102,18 @@ const areaText = computed(() => {
 .severity-tag__area {
   font-weight: 400;
   opacity: 0.9;
+}
+
+.severity-tag__manual {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  margin-left: 2px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  opacity: 0.95;
 }
 </style>

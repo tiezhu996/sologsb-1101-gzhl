@@ -6,6 +6,8 @@ import {
   stampBackupTime,
   type BackupPayload
 } from '@/utils/db'
+import { normalizeDecaySeverity } from '@/utils/severity'
+import type { Decay } from '@/types/decay'
 
 /** 校验备份对象的必备字段，返回错误信息数组（为空表示通过） */
 export function validateBackup(input: unknown): { ok: boolean; errors: string[]; payload: BackupPayload | null } {
@@ -26,6 +28,8 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
     if (!Array.isArray(obj[key])) errors.push(`${key} 字段缺失或不是数组`)
   }
   if (errors.length > 0) return { ok: false, errors, payload: null }
+  // 旧版本备份没有档位来源字段：按当前面积补一次判定，与 DB v3 迁移口径一致
+  const normalizedDecays = (obj.decays ?? []).map((decay) => normalizeDecaySeverity(decay as Decay))
   const payload: BackupPayload = {
     app: 'gbmuralarch',
     dbVersion: typeof obj.dbVersion === 'number' ? obj.dbVersion : DB_VERSION,
@@ -33,7 +37,7 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
     halls: obj.halls ?? [],
     elements: obj.elements ?? [],
     layers: obj.layers ?? [],
-    decays: obj.decays ?? [],
+    decays: normalizedDecays,
     repairSteps: obj.repairSteps ?? []
   }
   return { ok: true, errors, payload }
@@ -230,6 +234,8 @@ export async function seedDemoData(): Promise<void> {
           layerId: layerIds[0],
           type: '起甲',
           severity: '重度',
+          severitySource: 'manual',
+          severityReason: '现场敲击大面积空鼓声，起甲已贯穿地仗，面积虽 320 cm² 仍按重度处置',
           areaCm2: 320.5,
           causeGuess: '地仗层脱胶，受檐口渗水影响',
           repaired: false,
@@ -241,7 +247,9 @@ export async function seedDemoData(): Promise<void> {
           id: decayIds[1],
           layerId: layerIds[1],
           type: '龟裂',
-          severity: '中度',
+          severity: '轻度',
+          severitySource: 'auto',
+          severityReason: null,
           areaCm2: 158,
           causeGuess: '木构件干缩引起画面开裂',
           repaired: false,

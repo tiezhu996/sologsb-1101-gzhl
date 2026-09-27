@@ -13,7 +13,8 @@ import { useDecayStore } from '@/stores/decayStore'
 import { useRepairStore } from '@/stores/repairStore'
 import { DECAY_TYPES, type Decay, type DecayType, type Severity } from '@/types/decay'
 import { SEVERITIES } from '@/types/decay'
-import { formatArea, SEVERITY_COLOR } from '@/utils/severity'
+import { formatArea, SEVERITY_COLOR, AREA_SEVERITY_RULE_TEXT } from '@/utils/severity'
+import { useSeverityForm } from '@/hooks/useSeverityForm'
 
 const router = useRouter()
 const hallStore = useHallStore()
@@ -38,14 +39,27 @@ const {
 
 const batchSeverity = ref<Severity>('中度')
 const batchType = ref<DecayType>('起甲')
+const batchReason = ref('')
 const editDialogVisible = ref(false)
 const editingDecay = ref<Decay | null>(null)
 const editForm = ref<{
   type: DecayType
-  severity: Severity
-  areaCm2: number
   causeGuess: string
-}>({ type: '起甲', severity: '轻度', areaCm2: 10, causeGuess: '' })
+}>({ type: '起甲', causeGuess: '' })
+
+/** 编辑时档位由 hook 接管：自动档改面积跨档会先问是否保留，保留即转人工定档 */
+const {
+  severity: editSeverity,
+  areaCm2: editArea,
+  source: editSeveritySource,
+  reason: editReason,
+  autoSeverity: editAutoSeverity,
+  isManual: editIsManual,
+  reasonMissing: editReasonMissing,
+  reset: resetEditSeverity,
+  arm: armEditSeverity,
+  followArea: followEditArea
+} = useSeverityForm({ askOnAreaChange: () => editingDecay.value !== null && editSeveritySource.value === 'auto' })
 
 const filterModel = computed<FilterModel>(() => ({
   keyword: filter.value.keyword,
@@ -132,8 +146,27 @@ async function applyBatchSeverity(): Promise<void> {
     ElMessage.warning('请先勾选需要修改的病害记录')
     return
   }
-  await decayStore.bulkSetSeverity(ids, batchSeverity.value)
-  ElMessage.success(`已将 ${ids.length} 条病害的严重程度改为「${batchSeverity.value}」`)
+  let reason = ''
+  try {
+    const { value } = await ElMessageBox.prompt(
+      `将 ${ids.length} 条病害改判为「${batchSeverity.value}」。师傅现场改判记为人工定档，请写明依据：`,
+      '批量人工定档',
+      {
+        confirmButtonText: '应用',
+        cancelButtonText: '取消',
+        inputType: 'textarea',
+        inputValue: batchReason.value,
+        inputPlaceholder: '如：现场复勘发现裂纹贯穿、空鼓范围扩大',
+        inputValidator: (value: string) => value.trim().length > 0 || '请写明人工定档依据'
+      }
+    )
+    reason = value
+  } catch {
+    return
+  }
+  batchReason.value = reason.trim()
+  await decayStore.bulkSetSeverity(ids, batchSeverity.value, reason)
+  ElMessage.success(`已将 ${ids.length} 条病害人工定档为「${batchSeverity.value}」`)
 }
 
 async function applyBatchType(): Promise<void> {
@@ -150,19 +183,30 @@ function openEdit(row: { decay: Decay }): void {
   editingDecay.value = row.decay
   editForm.value = {
     type: row.decay.type,
-    severity: row.decay.severity,
-    areaCm2: row.decay.areaCm2,
     causeGuess: row.decay.causeGuess
   }
+  resetEditSeverity({
+    severity: row.decay.severity,
+    areaCm2: row.decay.areaCm2,
+    source: row.decay.severitySource,
+    reason: row.decay.severityReason ?? ''
+  })
+  armEditSeverity()
   editDialogVisible.value = true
 }
 
 async function submitEdit(): Promise<void> {
   if (!editingDecay.value) return
+  if (editReasonMissing.value) {
+    ElMessage.warning('人工定档需写明现场依据')
+    return
+  }
   await decayStore.updateDecay(editingDecay.value.id, {
     type: editForm.value.type,
-    severity: editForm.value.severity,
-    areaCm2: editForm.value.areaCm2,
+    severity: editSeverity.value,
+    severitySource: editSeveritySource.value,
+    severityReason: editSeveritySource.value === 'manual' ? editReason.value.trim() : null,
+    areaCm2: editArea.value,
     causeGuess: editForm.value.causeGuess.trim() || '待现场复核'
   })
   editDialogVisible.value = false
@@ -326,9 +370,15 @@ const severityPalette = SEVERITY_COLOR
             <el-tag size="small" effect="plain">{{ row.decay.type }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="严重程度" width="170">
+        <el-table-column label="严重程度" width="200">
           <template #default="{ row }">
-            <SeverityTag :severity="row.decay.severity" :area-cm2="row.decay.areaCm2" size="small" />
+            <SeverityTag
+              :severity="row.decay.severity"
+              :area-cm2="row.decay.areaCm2"
+              :manual="row.decay.severitySource === 'manual'"
+              :reason="row.decay.severityReason"
+              size="small"
+            />
           </template>
         </el-table-column>
         <el-table-column label="殿宇" width="150">
@@ -390,15 +440,40 @@ const severityPalette = SEVERITY_COLOR
             <el-option v-for="item in typeOptionsForEdit" :key="item" :label="item" :value="item" />
           </el-select>
         </el-form-item>
+        <el-form-item label="面积（cm²）">
+          <el-input-number v-model="editArea" :min="0.1" :max="1000000" :step="10" :precision="1" />
+          <p class="severity-hint">按面积自动落档：{{ AREA_SEVERITY_RULE_TEXT }}</p>
+        </el-form-item>
         <el-form-item label="严重程度">
-          <el-radio-group v-model="editForm.severity">
+          <el-radio-group v-model="editSeverity">
             <el-radio v-for="item in severityOptionsForEdit" :key="item" :value="item">
               <span :style="{ color: severityPalette[item] }">{{ item }}</span>
             </el-radio>
           </el-radio-group>
+          <el-tag v-if="editIsManual" size="small" type="warning" effect="plain" class="severity-badge">
+            人工定档
+          </el-tag>
+          <el-tag v-else size="small" type="success" effect="plain" class="severity-badge">按面积自动</el-tag>
+          <el-button
+            v-if="editIsManual"
+            link
+            type="primary"
+            size="small"
+            class="severity-restore"
+            @click="followEditArea"
+          >
+            恢复按面积落「{{ editAutoSeverity }}」
+          </el-button>
         </el-form-item>
-        <el-form-item label="面积（cm²）">
-          <el-input-number v-model="editForm.areaCm2" :min="0.1" :max="1000000" :step="10" :precision="1" />
+        <el-form-item v-if="editIsManual" label="定档依据" required>
+          <el-input
+            v-model="editReason"
+            type="textarea"
+            :rows="2"
+            maxlength="120"
+            show-word-limit
+            placeholder="请写明师傅现场判定依据，如：裂缝已贯穿地仗、空鼓敲击大面积脱层"
+          />
         </el-form-item>
         <el-form-item label="成因初判">
           <el-input v-model="editForm.causeGuess" type="textarea" :rows="3" maxlength="120" show-word-limit />
@@ -437,5 +512,20 @@ const severityPalette = SEVERITY_COLOR
 .repair-progress {
   margin-left: 6px;
   font-size: 12px;
+}
+
+.severity-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #8a7f72;
+}
+
+.severity-badge {
+  margin-left: 8px;
+}
+
+.severity-restore {
+  margin-left: 4px;
 }
 </style>

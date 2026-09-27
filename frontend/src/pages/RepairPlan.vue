@@ -361,7 +361,14 @@ const stateOptions = REPAIR_STATES
             <p class="muted">{{ groupSubtitle(group) }}</p>
           </div>
           <div class="timeline__head-right">
-            <SeverityTag v-if="group.decay" :severity="group.decay.severity" size="small" plain />
+            <SeverityTag
+              v-if="group.decay"
+              :severity="group.decay.severity"
+              :manual="group.decay.severitySource === 'manual'"
+              :reason="group.decay.severityReason"
+              size="small"
+              plain
+            />
             <el-tag :type="group.percent === 100 ? 'success' : 'info'" effect="plain" round>
               {{ group.doneCount }}/{{ group.totalCount }}（{{ group.percent }}%）
             </el-tag>
